@@ -1,4 +1,3 @@
-import exceptionHandling.NullPathException
 import java.io.*
 
 class DebugHandler (debuggerPath: String) {
@@ -6,17 +5,24 @@ class DebugHandler (debuggerPath: String) {
     var path: String? = null
     var breakPoints: List<Int> = emptyList()
     var fileName: String? = null
-    private var breakHandler: () -> Unit = {}
+    var breakHandlerFun: () -> Unit = {}
 
-    private var paused = false
-    private var gdbOutput: BufferedReader? = null
-    private var gdbInput: BufferedWriter? = null
+    var paused = false
+    var gdbOutput: BufferedReader? = null
+    var gdbInput: BufferedWriter? = null
 
     private fun compileFile() {
-        ProcessBuilder(listOf("gcc", "-g", fileName, "-o", "exec"))
-            .directory(File(path ?: throw NullPathException()))
-            .start()
-            .waitFor()
+        try {
+            val processBuilder = ProcessBuilder("gcc", "-g", fileName, "-o", "exec")
+                .directory(File(path ?: throw NullPointerException("Path cannot be null!")))
+            val process = processBuilder.start()
+            val exitCode = process.waitFor()
+            if (exitCode != 0) {
+                throw RuntimeException("Compilation failed with exit code: $exitCode! Make sure that your code contains no errors!")
+            }
+        } catch (e: Exception) {
+            println("Error during compilation: ${e.message}")
+        }
     }
 
     private fun setBreakpoint(gdbInput: BufferedWriter, location: String) {
@@ -46,18 +52,19 @@ class DebugHandler (debuggerPath: String) {
     }
 
     fun setBreakHandler(breakHandleFunction: () -> Unit) {
-        this.breakHandler = breakHandleFunction
+        this.breakHandlerFun = breakHandleFunction
     }
 
     fun resume() {
         paused = false
+        Thread.sleep(1000)
     }
 
     private fun pause () {
         paused = true
     }
 
-    private fun resumeExecution() {
+    fun resumeExecution() {
         gdbInput?.write("-exec-continue\n")
         gdbInput?.flush()
     }
@@ -75,7 +82,8 @@ class DebugHandler (debuggerPath: String) {
             while (gdbOutput?.readLine().also { line = it } != null) {
                 if (line?.startsWith("^done,stack=") == true) {
                     // Extract and return the stack trace
-                    return line ?: "Backtrace is not available"
+                    return viewBackTrace(line ?: "Backtrace is not available")
+                    //return line ?: "Backtrace is not available"
                 } else if (line?.startsWith("^error") == true) {
                     throw Exception("Error: " + line?.substringAfterLast("msg=\"")?.substringBefore("\""))
                 }
@@ -86,14 +94,41 @@ class DebugHandler (debuggerPath: String) {
         return "Backtrace was not found"
     }
 
+    private fun viewBackTrace(backTrace: String) : String {
+        val stringBuilder = StringBuilder()
+        val stackTraceContent = backTrace.substringAfter("[frame={").substringBeforeLast("}]")
+
+        // Split the stack trace content by "},"
+        val frameStrings = stackTraceContent.split("},")
+
+        // Iterate over each frame string
+        for (frameString in frameStrings) {
+            // Extract individual frame attributes
+            val attributes = frameString.split(",") // Split attributes by comma
+            val level = getValue(attributes[0])
+            val addr = getValue(attributes[1])
+            val func = getValue(attributes[2])
+            val file = getValue(attributes[3])
+            val line = getValue(attributes[4])
+
+            // Append formatted frame information to the StringBuilder
+            stringBuilder.append("Level: $level, Address: $addr, Function: $func, File: $file, Line: $line\n")
+        }
+        return stringBuilder.toString()
+    }
+
+    private fun getValue(attribute: String): String {
+        return attribute.substringAfter("=").trim('"')
+    }
+
     fun run() {
         try {
             // Compiles a file
             compileFile()
 
             // Creates a process for GDB
-            val gdbBuilder = ProcessBuilder("gdb", "--interpreter=mi", "--args", "$path/exec.exe")
-            gdbBuilder.directory(File(path ?: throw NullPathException()))
+            val gdbBuilder = ProcessBuilder("gdb", "--interpreter=mi", "$path/exec.exe")
+            gdbBuilder.directory(File(path ?: throw NullPointerException("Path cannot be Null!")))
             val gdbProcess = gdbBuilder.start()
 
             gdbInput = gdbProcess.outputStream.bufferedWriter()
@@ -110,7 +145,7 @@ class DebugHandler (debuggerPath: String) {
 
             // Works with breakpoints
             var line: String
-            while (gdbOutput!!.readLine().also { line = it } != null) {
+            while (gdbOutput?.readLine().also { line = it ?: "null" } != null) {
                 if (line.contains("^done,bkpt")) {
                     gdbOutput?.mark(4096)
                     // Pauses the implementation
@@ -118,7 +153,7 @@ class DebugHandler (debuggerPath: String) {
                     viewBreakpoint(line)
 
                     // Logic to be implemented inside a breakpoint
-                    breakHandler()
+                    breakHandlerFun()
 
                     gdbOutput?.reset()
                     while (paused) {
@@ -127,10 +162,15 @@ class DebugHandler (debuggerPath: String) {
                     resumeExecution()
                 } else if (line.startsWith("^error")) {
                     throw Exception("Error response from GDB: $line")
+                } else if (line.startsWith("=thread-group-exited")) {
+                    break
                 }
             }
         } catch(e: Exception) {
             println(e.message)
+        } finally {
+            gdbInput?.close()
+            gdbOutput?.close()
         }
     }
 }
